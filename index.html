@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Sprite Player Demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: #111827;
+      color: #e5e7eb;
+      font-family: "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+    }
+    .topbar {
+      padding: 10px 14px;
+      border-bottom: 1px solid #374151;
+      background: #0f172a;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    .topbar label {
+      font-size: 13px;
+      color: #93c5fd;
+      margin-right: 4px;
+    }
+    .character-button {
+      border: 1px solid #4b5563;
+      background: #1f2937;
+      color: #f3f4f6;
+      padding: 6px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: transform 0.08s ease, background 0.12s ease;
+    }
+    .character-button:hover {
+      background: #374151;
+    }
+    .character-button:active {
+      transform: scale(0.97);
+    }
+    .character-button.active {
+      background: #1d4ed8;
+      border-color: #60a5fa;
+    }
+    .info {
+      margin-left: auto;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    #gameContainer {
+      width: min(100vw, 980px);
+      height: min(75vh, 600px);
+      margin: 10px auto;
+      border: 1px solid #374151;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0b1220;
+      touch-action: none;
+    }
+    #gameCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: linear-gradient(180deg, #0f172a 0%, #1e293b 55%, #0f172a 100%);
+    }
+    .help {
+      width: min(100vw, 980px);
+      margin: 0 auto 14px;
+      font-size: 13px;
+      color: #cbd5e1;
+      padding: 0 8px;
+    }
+    .kbd {
+      display: inline-block;
+      min-width: 24px;
+      text-align: center;
+      border: 1px solid #64748b;
+      border-radius: 5px;
+      padding: 1px 6px;
+      background: #0f172a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar" id="characterButtons">
+    <label>キャラ選択:</label>
+  </div>
+  <div id="gameContainer">
+    <canvas id="gameCanvas"></canvas>
+  </div>
+  <div class="help">
+    操作:
+    <span class="kbd">←</span>/<span class="kbd">→</span> 移動,
+    <span class="kbd">Space</span> ジャンプ,
+    <span class="kbd">Z</span> 攻撃
+  </div>
+
+  <script>
+    class InputManager {
+      constructor() {
+        this.keys = new Set();
+        this.justPressed = new Set();
+
+        window.addEventListener("keydown", (event) => {
+          if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space", "KeyZ"].includes(event.code)) {
+            event.preventDefault();
+          }
+          if (!this.keys.has(event.code)) {
+            this.justPressed.add(event.code);
+          }
+          this.keys.add(event.code);
+        });
+
+        window.addEventListener("keyup", (event) => {
+          this.keys.delete(event.code);
+        });
+      }
+
+      isDown(code) {
+        return this.keys.has(code);
+      }
+
+      consumeJustPressed(code) {
+        if (this.justPressed.has(code)) {
+          this.justPressed.delete(code);
+          return true;
+        }
+        return false;
+      }
+
+      endFrame() {
+        this.justPressed.clear();
+      }
+    }
+
+    class Sprite {
+      constructor(image, columns = 5, rows = 5) {
+        this.image = image;
+        this.columns = columns;
+        this.rows = rows;
+        this.totalFrames = columns * rows;
+        this.frameWidth = 0;
+        this.frameHeight = 0;
+
+        this.stateTable = {
+          idle: { start: 0, end: 4, fps: 6 },
+          run: { start: 5, end: 9, fps: 10 },
+          jump: { start: 10, end: 14, fps: 8 },
+          attack: { start: 15, end: 19, fps: 14 }
+        };
+
+        this.state = "idle";
+        this.frameCursor = 0;
+        this.frameTimer = 0;
+      }
+
+      setImage(image) {
+        this.image = image;
+        this.computeFrameSize();
+      }
+
+      computeFrameSize() {
+        // 端数を切り捨てて隣フレームの混入（にじみ）を防ぐ
+        this.frameWidth = Math.floor(this.image.width / this.columns);
+        this.frameHeight = Math.floor(this.image.height / this.rows);
+        this.buildAlphaData();
+      }
+
+      buildAlphaData() {
+        if (!this.image.complete || this.frameWidth <= 0 || this.frameHeight <= 0) return;
+
+        const offscreen = document.createElement("canvas");
+        offscreen.width = this.image.width;
+        offscreen.height = this.image.height;
+        const octx = offscreen.getContext("2d", { willReadFrequently: true });
+        octx.drawImage(this.image, 0, 0);
+
+        // 白背景を透過化（ほぼ白ピクセルのみ）
+        const all = octx.getImageData(0, 0, offscreen.width, offscreen.height);
+        const pixels = all.data;
+        for (let i = 0; i < pixels.length; i += 4) {
+          const r = pixels[i];
+          const g = pixels[i + 1];
+          const b = pixels[i + 2];
+          if (r > 245 && g > 245 && b > 245) {
+            pixels[i + 3] = 0;
+          }
+        }
+        octx.putImageData(all, 0, 0);
+        this.image = offscreen;
+
+      }
+
+      setState(newState, keepProgress = true) {
+        if (this.state === newState) return;
+        const previousConfig = this.stateTable[this.state];
+        const nextConfig = this.stateTable[newState];
+
+        let progress = 0;
+        if (keepProgress && previousConfig) {
+          const prevRange = previousConfig.end - previousConfig.start + 1;
+          const prevOffset = this.frameCursor - previousConfig.start;
+          progress = Math.max(0, Math.min(1, prevRange > 1 ? prevOffset / (prevRange - 1) : 0));
+        }
+
+        this.state = newState;
+        if (nextConfig) {
+          const nextRange = nextConfig.end - nextConfig.start + 1;
+          this.frameCursor = nextConfig.start + Math.round(progress * Math.max(0, nextRange - 1));
+        }
+      }
+
+      getCurrentFrame() {
+        const config = this.stateTable[this.state];
+        if (!config) return 0;
+        return Math.max(config.start, Math.min(config.end, this.frameCursor));
+      }
+
+      update(deltaSec, speedScale = 1) {
+        const config = this.stateTable[this.state];
+        if (!config) return;
+
+        const start = config.start;
+        const end = config.end;
+        const frameDuration = 1 / (config.fps * Math.max(0.25, speedScale));
+
+        this.frameTimer += deltaSec;
+        while (this.frameTimer >= frameDuration) {
+          this.frameTimer -= frameDuration;
+          this.frameCursor += 1;
+          if (this.frameCursor > end) {
+            this.frameCursor = start;
+          }
+        }
+      }
+
+      draw(ctx, x, y, width, height, facingRight = true) {
+        // Image でも Canvas でも描画できるように判定する
+        const hasDrawable = this.image && this.image.width > 0 && this.image.height > 0;
+        if (!hasDrawable || this.frameWidth <= 0 || this.frameHeight <= 0) return;
+
+        const frame = this.getCurrentFrame();
+        const sx = (frame % this.columns) * this.frameWidth;
+        const sy = Math.floor(frame / this.columns) * this.frameHeight;
+        const sw = this.frameWidth;
+        const sh = this.frameHeight;
+
+        ctx.save();
+        if (!facingRight) {
+          ctx.translate(x + width, y);
+          ctx.scale(-1, 1);
+          ctx.drawImage(this.image, sx, sy, sw, sh, 0, 0, width, height);
+        } else {
+          ctx.drawImage(this.image, sx, sy, sw, sh, x, y, width, height);
+        }
+        ctx.restore();
+      }
+
+      getRenderSize(maxWidth, maxHeight) {
+        if (this.frameWidth <= 0 || this.frameHeight <= 0) {
+          return { width: maxWidth, height: maxHeight };
+        }
+        const scale = Math.min(maxWidth / this.frameWidth, maxHeight / this.frameHeight);
+        return {
+          width: this.frameWidth * scale,
+          height: this.frameHeight * scale
+        };
+      }
+    }
+
+    class Player {
+      constructor(sprite, x, y) {
+        this.sprite = sprite;
+
+        this.pos = { x, y };
+        this.prevPos = { x, y };
+        this.vel = { x: 0, y: 0 };
+
+        // 物理用（当たり判定）サイズ
+        this.width = 56;
+        this.height = 84;
+        // 描画用の最大サイズ（スプライト全体）
+        this.maxRenderWidth = 138;
+        this.maxRenderHeight = 148;
+        // 物理ボックスと見た目スプライトの差を補正（足が地面に埋まらないように）
+        this.visualGroundOffset = 18;
+
+        this.facingRight = true;
+        this.isGrounded = false;
+        this.attackTimer = 0;
+
+        this.maxSpeed = 340;
+        this.accel = 1800;
+        this.decel = 1600;
+        this.gravity = 1800;
+        this.jumpVelocity = -720;
+        this.attackDuration = 0.28;
+      }
+
+      setSprite(sprite) {
+        const currentState = this.sprite.state;
+        const frameCursor = this.sprite.frameCursor;
+        const frameTimer = this.sprite.frameTimer;
+        this.sprite = sprite;
+        this.sprite.state = currentState;
+        this.sprite.frameCursor = frameCursor;
+        this.sprite.frameTimer = frameTimer;
+      }
+
+      applyDisplayProfile(profile = {}) {
+        this.maxRenderWidth = profile.maxRenderWidth ?? this.maxRenderWidth;
+        this.maxRenderHeight = profile.maxRenderHeight ?? this.maxRenderHeight;
+        this.visualGroundOffset = profile.visualGroundOffset ?? this.visualGroundOffset;
+      }
+
+      update(input, deltaSec, groundY) {
+        this.prevPos.x = this.pos.x;
+        this.prevPos.y = this.pos.y;
+
+        const moveInput = (input.isDown("ArrowRight") ? 1 : 0) - (input.isDown("ArrowLeft") ? 1 : 0);
+        const targetSpeed = moveInput * this.maxSpeed;
+        const accelRate = Math.abs(targetSpeed) > Math.abs(this.vel.x) ? this.accel : this.decel;
+
+        // ease-in/out: 目標速度へ滑らかに近づける
+        const deltaV = targetSpeed - this.vel.x;
+        const maxStep = accelRate * deltaSec;
+        this.vel.x += Math.max(-maxStep, Math.min(maxStep, deltaV));
+
+        if (Math.abs(this.vel.x) < 1) this.vel.x = 0;
+
+        if (moveInput !== 0) {
+          this.facingRight = moveInput > 0;
+        }
+
+        if (input.consumeJustPressed("Space") && this.isGrounded) {
+          this.vel.y = this.jumpVelocity;
+          this.isGrounded = false;
+        }
+
+        if (input.consumeJustPressed("KeyZ")) {
+          this.attackTimer = this.attackDuration;
+        }
+
+        this.vel.y += this.gravity * deltaSec;
+
+        this.pos.x += this.vel.x * deltaSec;
+        this.pos.y += this.vel.y * deltaSec;
+
+        if (this.pos.y + this.height >= groundY) {
+          this.pos.y = groundY - this.height;
+          this.vel.y = 0;
+          this.isGrounded = true;
+        } else {
+          this.isGrounded = false;
+        }
+
+        if (this.attackTimer > 0) {
+          this.attackTimer -= deltaSec;
+        }
+
+        this.updateStateAndAnimation(deltaSec);
+      }
+
+      updateStateAndAnimation(deltaSec) {
+        let state = "idle";
+        if (this.attackTimer > 0) {
+          state = "attack";
+        } else if (!this.isGrounded) {
+          state = "jump";
+        } else if (Math.abs(this.vel.x) > 15) {
+          state = "run";
+        }
+
+        this.sprite.setState(state, true);
+
+        // 速度に応じて再生速度を可変（止まりかけでは最低速度を確保）
+        const runScale = Math.max(0.4, Math.abs(this.vel.x) / this.maxSpeed);
+        const speedScale = state === "run" ? runScale : 1;
+        this.sprite.update(deltaSec, speedScale);
+      }
+
+      draw(ctx, alpha) {
+        // 補間描画で見た目のカクつきを減らす
+        const interpX = this.prevPos.x + (this.pos.x - this.prevPos.x) * alpha;
+        const interpY = this.prevPos.y + (this.pos.y - this.prevPos.y) * alpha;
+
+        // 足元基準で描画して、画像サイズが変わっても地面に接地させる
+        const footX = interpX + this.width * 0.5;
+        const footY = interpY + this.height - this.visualGroundOffset;
+        const renderSize = this.sprite.getRenderSize(this.maxRenderWidth, this.maxRenderHeight);
+        const renderX = footX - renderSize.width * 0.5;
+        const renderY = footY - renderSize.height;
+
+        this.sprite.draw(ctx, renderX, renderY, renderSize.width, renderSize.height, this.facingRight);
+      }
+    }
+
+    class Game {
+      constructor(canvas, container) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext("2d");
+        this.ctx.imageSmoothingEnabled = false;
+        this.container = container;
+        this.input = new InputManager();
+
+        this.images = {};
+        this.sprites = {};
+        this.activeCharacterKey = "char_c";
+        this.characterProfiles = {
+          char_c: { maxRenderWidth: 142, maxRenderHeight: 152, visualGroundOffset: 18 },
+          char_d: { maxRenderWidth: 140, maxRenderHeight: 150, visualGroundOffset: 16 },
+          gothic: { maxRenderWidth: 136, maxRenderHeight: 148, visualGroundOffset: 14 },
+          native: { maxRenderWidth: 136, maxRenderHeight: 148, visualGroundOffset: 14 }
+        };
+
+        this.player = null;
+        this.groundY = 0;
+        this.worldWidth = 2200;
+
+        this.cameraX = 0;
+        this.targetDt = 1 / 120;
+        this.accumulator = 0;
+        this.lastTime = 0;
+
+        this.resizeCanvas();
+        window.addEventListener("resize", () => this.resizeCanvas());
+      }
+
+      resizeCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        const w = this.container.clientWidth;
+        const h = this.container.clientHeight;
+        this.canvas.width = Math.floor(w * dpr);
+        this.canvas.height = Math.floor(h * dpr);
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        this.groundY = h - 68;
+      }
+
+      async load() {
+        const characterFiles = {
+          char_c: "char_c.png",
+          char_d: "char_d.png",
+          gothic: "gothic.png",
+          native: "native.png"
+        };
+
+        const entries = Object.entries(characterFiles);
+        await Promise.all(
+          entries.map(async ([key, src]) => {
+            const image = await this.loadImage(src);
+            this.images[key] = image;
+            const sprite = new Sprite(image, 5, 5);
+            sprite.computeFrameSize();
+            this.sprites[key] = sprite;
+          })
+        );
+
+        this.player = new Player(this.sprites[this.activeCharacterKey], 160, this.groundY - 84);
+        this.player.applyDisplayProfile(this.characterProfiles[this.activeCharacterKey]);
+        this.createCharacterButtons(entries);
+      }
+
+      loadImage(src) {
+        return new Promise((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve(image);
+          image.onerror = () => reject(new Error("画像読み込み失敗: " + src));
+          image.src = src;
+        });
+      }
+
+      createCharacterButtons(entries) {
+        const root = document.getElementById("characterButtons");
+        const info = document.createElement("div");
+        info.className = "info";
+        info.textContent = "アニメーションはキャラ切替後も継続";
+
+        for (const [key] of entries) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "character-button";
+          button.dataset.characterKey = key;
+          button.textContent = key;
+          button.addEventListener("click", () => this.switchCharacter(key));
+          root.appendChild(button);
+        }
+        root.appendChild(info);
+        this.syncButtonActive();
+      }
+
+      switchCharacter(key) {
+        if (!this.sprites[key] || key === this.activeCharacterKey) return;
+        this.activeCharacterKey = key;
+        this.player.setSprite(this.sprites[key]);
+        this.player.applyDisplayProfile(this.characterProfiles[key]);
+        this.syncButtonActive();
+      }
+
+      syncButtonActive() {
+        const buttons = document.querySelectorAll(".character-button");
+        buttons.forEach((button) => {
+          button.classList.toggle("active", button.dataset.characterKey === this.activeCharacterKey);
+        });
+      }
+
+      update(dt) {
+        this.player.update(this.input, dt, this.groundY);
+        this.player.pos.x = Math.max(0, Math.min(this.worldWidth - this.player.width, this.player.pos.x));
+
+        const visibleWidth = this.canvas.clientWidth;
+        const centerOffset = visibleWidth * 0.5;
+        const targetCameraX = this.player.pos.x - centerOffset + this.player.width * 0.5;
+        const camLerp = 1 - Math.pow(0.01, dt); // dt依存の滑らかな追従
+        this.cameraX += (targetCameraX - this.cameraX) * camLerp;
+        this.cameraX = Math.max(0, Math.min(this.worldWidth - visibleWidth, this.cameraX));
+      }
+
+      drawBackground(ctx, width, height) {
+        ctx.fillStyle = "#0b1220";
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.globalAlpha = 0.18;
+        ctx.fillStyle = "#1d4ed8";
+        for (let i = 0; i < 10; i++) {
+          const y = 40 + i * 22;
+          ctx.fillRect(0, y, width, 1);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      drawGround(ctx, width, height) {
+        const groundTop = this.groundY;
+        ctx.fillStyle = "#14532d";
+        ctx.fillRect(0, groundTop, width, height - groundTop);
+        ctx.fillStyle = "#166534";
+        ctx.fillRect(0, groundTop, width, 6);
+      }
+
+      draw(alpha) {
+        const ctx = this.ctx;
+        const w = this.canvas.clientWidth;
+        const h = this.canvas.clientHeight;
+
+        this.drawBackground(ctx, w, h);
+
+        ctx.save();
+        ctx.translate(-this.cameraX, 0);
+
+        this.drawGround(ctx, this.worldWidth, h);
+        this.player.draw(ctx, alpha);
+
+        ctx.restore();
+
+        ctx.fillStyle = "#e5e7eb";
+        ctx.font = "14px sans-serif";
+        ctx.fillText("State: " + this.player.sprite.state, 12, 22);
+        ctx.fillText("SpeedX: " + this.player.vel.x.toFixed(1), 12, 42);
+      }
+
+      run = (timestampMs) => {
+        const timestampSec = timestampMs * 0.001;
+        if (this.lastTime === 0) {
+          this.lastTime = timestampSec;
+        }
+
+        let frameDelta = timestampSec - this.lastTime;
+        this.lastTime = timestampSec;
+
+        // タブ復帰時の極端なdeltaを抑えて挙動崩壊を防ぐ
+        frameDelta = Math.min(frameDelta, 0.1);
+        this.accumulator += frameDelta;
+
+        while (this.accumulator >= this.targetDt) {
+          this.update(this.targetDt);
+          this.input.endFrame();
+          this.accumulator -= this.targetDt;
+        }
+
+        const alpha = this.accumulator / this.targetDt;
+        this.draw(alpha);
+        requestAnimationFrame(this.run);
+      };
+    }
+
+    async function start() {
+      const canvas = document.getElementById("gameCanvas");
+      const container = document.getElementById("gameContainer");
+      const game = new Game(canvas, container);
+
+      try {
+        await game.load();
+        requestAnimationFrame(game.run);
+      } catch (error) {
+        console.error(error);
+        alert("画像の読み込みに失敗しました。ファイル配置を確認してください。");
+      }
+    }
+
+    start();
+  </script>
+</body>
+</html>
